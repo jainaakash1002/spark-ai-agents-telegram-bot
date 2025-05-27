@@ -3,6 +3,7 @@ import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 import { getGeminiResponse,getGeminiChatResponse } from './gemini.js';
 import pool from "./db.js";
+import cron from 'node-cron';
 
 dotenv.config();
 const app = express();
@@ -11,10 +12,25 @@ const port = process.env.PORT || 3000;
 const token = process.env.TELEGRAM_TOKEN;
 const bot = new TelegramBot(token, { polling: true });
 
+// (async () => {
+// 	await bot.setMyCommands([
+// 		{ command: "alive", description: "Check the bot is alive or not" },
+// 		{ command: "clearHistory", description: "Clear the history with bot!" },
+// 	]);
+// })();
+
+// At the start of your bot initialization
 (async () => {
-	await bot.setMyCommands([
-		{ command: "alive", description: "Check the bot is alive or not" }
-	]);
+    try {
+        await bot.setMyCommands([
+            { command: 'start', description: 'Start the bot' },
+            { command: 'alive', description: 'Check if bot is running!' },
+            { command: 'clearhistory', description: "Clear the history with bot!" },
+        ]);
+        console.log('Bot commands registered successfully');
+    } catch (error) {
+        console.error('Error setting bot commands:', error);
+    }
 })();
 
 bot.onText(/\/start/, (msg) => {
@@ -25,11 +41,51 @@ bot.onText(/\/start/, (msg) => {
 });
 
 bot.onText(/\/alive/, (msg) => {
-	console.log(msg);
 	bot.sendMessage(msg.chat.id, "Hey Telegrammer I(🤖)'m up and running! How can i help you today?");
 });
 
+// bot.onText(/\/clearhistory/, async (msg) => {
+//     try {
+//         const userId = msg.from.id;
+//         const deleteQuery = 'DELETE FROM telegram_messages WHERE user_id = $1';
+//         const result = await pool.query(deleteQuery, [userId]);
+//         bot.sendChatAction(userId, 'typing');
 
+//         const response = result.rowCount > 0
+//             ? `Successfully cleared ${result.rowCount} messages from your history.`
+//             : 'No message history found to clear.';
+//         if(result.rowCount > 0)    
+//         await bot.sendMessage(msg.from.id, "Cleared your history!");
+//     } catch (error) {
+//         console.error('Failed to clear history:', error);
+//         await bot.sendMessage(msg.chat.id, "Sorry, I couldn't clear your message history. Please try again later.");
+//     }
+// });
+
+bot.onText(/\/clearhistory/, async (msg) => {
+    const userId = msg.from.id;
+    bot.sendChatAction(userId, 'typing');
+    
+    try {
+        // Use a more efficient query with LIMIT 1 to check existence
+        const checkQuery = 'SELECT EXISTS(SELECT 1 FROM telegram_messages WHERE user_id = $1 LIMIT 1)';
+        const { exists } = (await pool.query(checkQuery, [userId])).rows[0];
+        
+        if (!exists) {
+            await bot.sendMessage(userId, 'No message history found to clear.');
+            return;
+        }
+        
+        // If messages exist, perform the delete operation
+        const deleteQuery = 'DELETE FROM telegram_messages WHERE user_id = $1';
+        const result = await pool.query(deleteQuery, [userId]);
+        await bot.sendMessage(userId, `Cleared yours ${result.rowCount} messages from our history!`);
+        
+    } catch (error) {
+        console.error('Failed to clear history:', error);
+        await bot.sendMessage(msg.chat.id, "Sorry, I couldn't clear your message history. Please try again later.");
+    }
+});
 bot.on('message', async (msg) => {
     if (msg.text && msg.text.startsWith('/')) return;
     
@@ -78,6 +134,29 @@ bot.on('message', async (msg) => {
     } catch (error) {
         console.error('Error:', error);
         bot.sendMessage(chatId, 'Sorry, I encountered an error processing your request.');
+    }
+});
+
+cron.schedule('*/5 * * * *', async () => {
+    try {
+        const response = await fetch(process.env.BASE_URL);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        console.log('Cron job executed successfully:', new Date().toISOString());
+    } catch (error) {
+        console.error('Cron job failed:', error);
+    }
+});
+
+cron.schedule('0 */3 * * *', async () => {
+    try {
+        const threeDoysAgo = Date.now() / 1000 - (3 * 24 * 60 * 60);
+        const deleteQuery = 'DELETE FROM telegram_messages WHERE CAST(date AS BIGINT) < $1';
+        const result = await pool.query(deleteQuery, [Math.floor(threeDoysAgo)]);
+        console.log(`Cleanup completed: ${result.rowCount} old messages deleted at ${new Date().toISOString()}`);
+    } catch (error) {
+        console.error('Message cleanup failed:', error);
     }
 });
 
